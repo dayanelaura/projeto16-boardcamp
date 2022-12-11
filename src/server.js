@@ -119,12 +119,12 @@ app.get('/customers', async (req,res) => {
 app.get('/customers/:id', async (req, res) => {
     try{
         const { id } = req.params;
-        const customer = await connection.query(`SELECT * FROM customers WHERE id=${id}`);
+        const customer = await connection.query(`SELECT * FROM customers WHERE id=$1`, [id]);
         
         if(customer.rows[0] === undefined)
             return res.sendStatus(404);
 
-        res.send(customer);
+        res.send(customer.rows[0]);
     }catch(err){
         console.log(err);
         res.sendStatus(500);
@@ -146,7 +146,8 @@ app.post('/customers', async (req, res) => {
             return res.sendStatus(400);
 
         const birthdayValidation = dayjs(birthday).format('YYYY-MM-DD');
-        if(!birthdayValidation || birthdayValidation !== birthday)
+        const today = dayjs().format('YYYY-MM-DD');
+        if(!birthdayValidation || birthdayValidation !== birthday || birthday > today)
             return res.sendStatus(400);
 
         const isThereCpf = await connection.query(`SELECT * FROM customers WHERE cpf='${cpf}'`);
@@ -159,6 +160,43 @@ app.post('/customers', async (req, res) => {
         `);
 
         res.sendStatus(201);
+    }catch(err){
+        console.log(err);
+        res.sendStatus(500);
+    }
+});
+
+app.put('/customers/:id', async (req, res) => {
+    try{
+        const { id } = req.params;
+        const { name, phone, cpf, birthday } = req.body;
+
+        const { error } = customerSchema.validate(req.body, { abortEarly: false });
+        if(error){
+            const errors = error.details;
+            const errorsTXT = errors.map(detail => detail.message);
+            return res.status(400).send(errorsTXT);
+        }
+            
+        if(isNaN(cpf) || isNaN(phone))
+            return res.sendStatus(400);
+            
+        const birthdayValidation = dayjs(birthday).format('YYYY-MM-DD');
+        const today = dayjs().format('YYYY-MM-DD');
+        if(!birthdayValidation || birthdayValidation !== birthday || birthday > today)
+            return res.sendStatus(400);
+            
+        const isTheSameId = await connection.query(`SELECT id FROM customers WHERE cpf='${cpf}'`);
+
+        if(isTheSameId.rows[0] !== undefined && isTheSameId.rows[0].id !== Number(id))
+            return res.sendStatus(409);
+
+        const a = await connection.query(`
+            UPDATE customers SET name='${name}', phone='${phone}', cpf='${cpf}', birthday='${birthday}'
+            WHERE id=$1`, 
+        [id]);
+
+        res.sendStatus(200);
     }catch(err){
         console.log(err);
         res.sendStatus(500);
