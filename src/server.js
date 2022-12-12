@@ -5,6 +5,7 @@ import { categorieSchema } from "./models/categorieSchema.js";
 import { gameSchema } from "./models/gameSchema.js";
 import dayjs from "dayjs";
 import { customerSchema } from "./models/customerSchema.js";
+import { rentalSchema } from "./models/rentalSchema.js";
 
 const app = express();
 app.use(express.json());
@@ -105,9 +106,9 @@ app.get('/customers', async (req,res) => {
         let customers;
 
         if(cpf)
-            customers = await connection.query(`SELECT * FROM customers WHERE UPPER(customers.cpf) LIKE '${cpf.toUpperCase()}%'`);
+            customers = await connection.query(`SELECT *, birthday::text FROM customers WHERE UPPER(customers.cpf) LIKE '${cpf.toUpperCase()}%'`);
         else
-            customers = await connection.query(`SELECT * FROM customers`);
+            customers = await connection.query(`SELECT *, birthday::text FROM customers`);
 
         res.send(customers.rows);
     } catch(err){
@@ -119,7 +120,7 @@ app.get('/customers', async (req,res) => {
 app.get('/customers/:id', async (req, res) => {
     try{
         const { id } = req.params;
-        const customer = await connection.query(`SELECT * FROM customers WHERE id=$1`, [id]);
+        const customer = await connection.query(`SELECT *, birthday::text FROM customers WHERE id=$1`, [id]);
         
         if(customer.rows[0] === undefined)
             return res.sendStatus(404);
@@ -193,8 +194,8 @@ app.put('/customers/:id', async (req, res) => {
 
         const a = await connection.query(`
             UPDATE customers SET name='${name}', phone='${phone}', cpf='${cpf}', birthday='${birthday}'
-            WHERE id=$1`, 
-        [id]);
+            WHERE id=$1`, [id]
+            );
 
         res.sendStatus(200);
     }catch(err){
@@ -202,6 +203,139 @@ app.put('/customers/:id', async (req, res) => {
         res.sendStatus(500);
     }
 });
+
+app.get('/rentals', async (req, res) => {
+    try{
+        const { gameId } = req.query;
+        const { customerId } = req.query;
+        let rentals;
+
+        if(customerId){
+            rentals = await connection.query(`
+            SELECT rentals.*, "rentDate"::text, "returnDate"::text,
+                json_build_object('id', customers.id, 'name', customers.name) AS customer,
+                json_build_object('id', games.id, 'name', games.name, 'categoryId', games."categoryId", 'categoryName', categories.name) AS game
+            FROM rentals 
+                JOIN customers ON rentals."customerId" = customers.id
+                JOIN games ON rentals."gameId" = games.id
+                JOIN categories ON games."categoryId" = categories.id
+                WHERE customers.id = $1`, [customerId]
+            );
+        }else if(gameId){
+            rentals = await connection.query(`
+            SELECT rentals.*, "rentDate"::text, "returnDate"::text,
+                json_build_object('id', customers.id, 'name', customers.name) AS customer,
+                json_build_object('id', games.id, 'name', games.name, 'categoryId', games."categoryId", 'categoryName', categories.name) AS game
+            FROM rentals 
+                JOIN customers ON rentals."customerId" = customers.id
+                JOIN games ON rentals."gameId" = games.id
+                JOIN categories ON games."categoryId" = categories.id
+                WHERE games.id = $1`, [gameId]
+        );
+        }else{
+            rentals = await connection.query(`
+            SELECT rentals.*, "rentDate"::text, "returnDate"::text,
+                json_build_object('id', customers.id, 'name', customers.name) AS customer,
+                json_build_object('id', games.id, 'name', games.name, 'categoryId', games."categoryId", 'categoryName', categories.name) AS game
+            FROM rentals 
+                JOIN customers ON rentals."customerId" = customers.id
+                JOIN games ON rentals."gameId" = games.id
+                JOIN categories ON games."categoryId" = categories.id
+            ORDER BY id DESC
+        `);
+        }
+
+        res.send(rentals.rows);
+    }catch(err){
+        console.log(err);
+    }
+})
+
+app.post('/rentals', async (req, res) => {
+    try{
+        const { customerId, gameId, daysRented } = req.body;
+
+        const isThereCustomer = await connection.query(`SELECT * FROM customers WHERE id='${customerId}'`);
+        if(isThereCustomer.rows[0] === undefined)
+            return res.sendStatus(400);
+
+        const isThereGame = await connection.query(`SELECT * FROM games WHERE id='${gameId}'`);
+        if(isThereGame.rows[0] === undefined)
+            return res.sendStatus(400);
+
+        const gameIdRented = await connection.query(`SELECT * FROM rentals WHERE "gameId"=$1`, [gameId]);
+        const quantityRented = gameIdRented.rows.length;
+        const gameIdStock = isThereGame.rows[0].stockTotal;
+        const gameIdPricePerDay = isThereGame.rows[0].pricePerDay;
+
+        if(quantityRented >= gameIdStock)
+            return res.sendStatus(400);
+
+        const rentalObject = {
+            customerId,
+            gameId,
+            rentDate: dayjs().format('YYYY-MM-DD'),  
+            daysRented,         
+            returnDate: null,      
+            originalPrice: gameIdPricePerDay*daysRented,   
+            delayFee: null         
+        }
+
+        const { error } = rentalSchema.validate(rentalObject, { abortEarly: false });
+        if(error){
+            const errors = error.details;
+            const errorsTXT = errors.map(detail => detail.message);
+            return res.status(400).send(errorsTXT);
+        }
+
+        const { rentDate, returnDate, originalPrice, delayFee } = rentalObject;
+        await connection.query(`
+            INSERT INTO rentals
+                ("customerId", "gameId", "rentDate", "daysRented", "returnDate", "originalPrice", "delayFee") 
+            VALUES 
+                (${customerId}, ${gameId}, '${rentDate}', ${daysRented}, ${returnDate}, ${originalPrice}, ${delayFee})
+        `);
+
+        res.sendStatus(201);
+    }catch(err){
+        console.log(err);
+        res.sendStatus(500);
+    }
+});
+
+app.post('/rentals/:id/return', async (req, res) => {
+    try{
+        const { id } = req.params;
+
+        const isThereRental = await connection.query(`SELECT * FROM rentals WHERE id=$1`, [id]);
+        if(isThereRental.rows[0] === undefined)
+            return res.sendStatus(404);
+
+        if(isThereRental.rows[0].returnDate !== null)
+            return res.sendStatus(400);
+        
+        const gameId = isThereRental.rows[0].gameId;
+        const gameRented = await connection.query(`SELECT ("pricePerDay") FROM games WHERE id=$1`, [gameId]);  
+        const pricePerDay = gameRented.rows[0].pricePerDay;
+        const today = dayjs().format('YYYY-MM-DD');
+        const rentDate = dayjs(isThereRental.rows[0].rentDate);
+        const daysRented = isThereRental.rows[0].daysRented;
+        const deadline = rentDate.add(daysRented, 'day').format('YYYY-MM-DD'); 
+        const delayedDays = Math.floor((new Date(today) - new Date(deadline)) / (1000*60*60*24)); 
+
+        const delayFee = (delayedDays >= 0 ?  delayedDays*pricePerDay : 0);
+
+        await connection.query(`
+            UPDATE rentals SET "returnDate" = '${today}', "delayFee" = ${delayFee}
+            WHERE id=$1`, [id]
+        );
+
+        res.sendStatus(200);
+    }catch(err){
+        console.log(err);
+        res.sendStatus(500);
+    }
+})
 
 app.listen(4000, () => {
     console.log("Server running in port 4000");
