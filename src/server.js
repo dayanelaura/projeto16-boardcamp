@@ -323,7 +323,7 @@ app.post('/rentals/:id/return', async (req, res) => {
         const deadline = rentDate.add(daysRented, 'day').format('YYYY-MM-DD'); 
         const delayedDays = Math.floor((new Date(today) - new Date(deadline)) / (1000*60*60*24)); 
 
-        const delayFee = (delayedDays >= 0 ?  delayedDays*pricePerDay : 0);
+        const delayFee = (delayedDays >= 0 ? delayedDays*pricePerDay : 0);
 
         await connection.query(`
             UPDATE rentals SET "returnDate" = '${today}', "delayFee" = ${delayFee}
@@ -335,7 +335,26 @@ app.post('/rentals/:id/return', async (req, res) => {
         console.log(err);
         res.sendStatus(500);
     }
-})
+});
+
+app.delete('/rentals/:id', async (req, res) => {
+    try{
+        const { id } = req.params;
+        
+        const isThereId = await connection.query(`SELECT * FROM rentals WHERE id=$1`, [id]);
+        if(isThereId.rows[0] === undefined)
+            return res.sendStatus(404);
+
+        if(isThereId.rows[0].returnDate === null)
+            return res.sendStatus(400);
+
+        await connection.query(`DELETE FROM rentals WHERE id=$1`, [id]);
+        res.sendStatus(200);
+    }catch(err){
+        console.log(err);
+        res.sendStatus(500);
+    }
+});
 
 app.listen(4000, () => {
     console.log("Server running in port 4000");
